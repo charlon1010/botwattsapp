@@ -36,6 +36,13 @@ const assembleGameCooldowns = new Map();
  
 const cutCooldowns = new Map();
  
+// مجموعات مطفأة البوت فيها واللاعبين المحظورين
+const disabledGroups = new Set();
+const bannedUsers = new Set();
+ 
+// خريطة عامة لتتبع هل فيه أي فعالية جماعية شغالة بالقروب حالياً
+const activeGroupEvents = new Map();
+ 
 // ذاكرة تخزين مؤقتة للصور وللبيانات لتسريع البوت بشكل خارق
 const imageCache = new Map();
 let cachedUsers = null;
@@ -503,6 +510,36 @@ async function connectToWhatsApp() {
         const chatRoom = m.key.remoteJid;
         if (!chatRoom.endsWith('@g.us')) return;
  
+        // إذا كانت المجموعة مطفأة، تجاهل كل رسائلها ما عدا أمر .تشغيل لو حبيت أو أمر الإطفاء
+        if (disabledGroups.has(chatRoom)) {
+            const messageContent = m.message.conversation || m.message.extendedTextMessage?.text;
+            if (messageContent && messageContent.trim() === '.تشغيل') {
+                const sender = m.key.participant || m.key.remoteJid;
+                const users = loadData();
+                const userData = getUserData(users, sender);
+                const botJid = sock.user ? (sock.user.id.split(':')[0] + '@s.whatsapp.net') : '';
+                const isOwner = (
+                    sender.includes(OWNER_PHONE) || 
+                    (botJid && sender.includes(botJid.split('@')[0])) || 
+                    m.key.fromMe || 
+                    userData.isElite === true
+                );
+                if (isOwner) {
+                    disabledGroups.delete(chatRoom);
+                    await sock.sendMessage(chatRoom, { text: '*〄╎تم تشغيل البوت في هذه المجموعة بنجاح ✅*' }, { quoted: m });
+                    return;
+                }
+            }
+            return;
+        }
+ 
+        const sender = m.key.participant || m.key.remoteJid;
+ 
+        // التحقق من الحظر
+        if (bannedUsers.has(sender)) {
+            return; // تجاهل اللاعب المحظور تماماً
+        }
+ 
         // ----------------------------------------------------
         // 1. معالجة التفاعلات بالرياكت
         // ----------------------------------------------------
@@ -923,7 +960,6 @@ async function connectToWhatsApp() {
         const messageContent = m.message.conversation || m.message.extendedTextMessage?.text;
         if (!messageContent) return;
  
-        const sender = m.key.participant || m.key.remoteJid;
         const text = messageContent.trim();
         const args = text.split(' ');
         const command = args[0];
@@ -933,6 +969,45 @@ async function connectToWhatsApp() {
  
         const normalizedInput = normalizeArabicText(text);
  
+        // 👑 التحقق من صلاحية المشرف / النخبة / المالك
+        const botJid = sock.user ? (sock.user.id.split(':')[0] + '@s.whatsapp.net') : '';
+        const isOwner = (
+            sender.includes(OWNER_PHONE) || 
+            (botJid && sender.includes(botJid.split('@')[0])) || 
+            m.key.fromMe || 
+            userData.isElite === true
+        );
+ 
+        // أمر الإطفاء (.اطفاء)
+        if (command === '.اطفاء') {
+            if (!isOwner) {
+                await sock.sendMessage(chatRoom, { text: '*〄╎مسوي قوي ؟ روح نام تكفى 🥰*' }, { quoted: m });
+                return;
+            }
+            disabledGroups.add(chatRoom);
+            await sock.sendMessage(chatRoom, { text: '*〄╎تم اطفاء البوت من هذه المجموعه 🚨*' }, { quoted: m });
+            return;
+        }
+ 
+        // أمر الحظر (.حظر)
+        if (command === '.حظر') {
+            if (!isOwner) {
+                await sock.sendMessage(chatRoom, { text: '*〄╎مسوي قوي ؟ روح نام تكفى 🥰*' }, { quoted: m });
+                return;
+            }
+            const mentionedJid = m.message.extendedTextMessage?.contextInfo?.mentionedJid;
+            if (mentionedJid && mentionedJid.length > 0) {
+                const targetUser = mentionedJid[0];
+                bannedUsers.add(targetUser);
+                const targetTag = '@' + targetUser.split('@')[0];
+                await sock.sendMessage(chatRoom, { text: `*〄╎لقد تم حظر هذا الاعب ❌*`, mentions: [targetUser] }, { quoted: m });
+                return;
+            } else {
+                await sock.sendMessage(chatRoom, { text: '*〄╎منشن الشخص الذي تريد حظره ⚠️*' }, { quoted: m });
+                return;
+            }
+        }
+ 
         // الفحص الجماعي للعبة الصور (.صور)
         if (activeImageGames.has(chatRoom)) {
             const game = activeImageGames.get(chatRoom);
@@ -940,6 +1015,7 @@ async function connectToWhatsApp() {
                 game.active = false;
                 clearTimeout(game.timeout);
                 activeImageGames.delete(chatRoom);
+                activeGroupEvents.delete(chatRoom);
  
                 userData.wallet += game.value;
                 saveData(users);
@@ -961,6 +1037,7 @@ async function connectToWhatsApp() {
                     aGame.active = false;
                     clearTimeout(aGame.timeout);
                     activeAssembleGames.delete(chatRoom);
+                    activeGroupEvents.delete(chatRoom);
  
                     userData.wallet += 300;
                     saveData(users);
@@ -984,6 +1061,7 @@ async function connectToWhatsApp() {
                     uGame.active = false;
                     clearTimeout(uGame.timeout);
                     activeUnscrambleGames.delete(chatRoom);
+                    activeGroupEvents.delete(chatRoom);
  
                     userData.wallet += uGame.value;
                     saveData(users);
@@ -1015,11 +1093,12 @@ async function connectToWhatsApp() {
                     wGame.active = false;
                     clearTimeout(wGame.timeout);
                     activeWritingGames.delete(chatRoom);
+                    activeGroupEvents.delete(chatRoom);
  
-                    userData.wallet += 2000;
+                    userData.wallet += 300; // تم التعديل لتصبح 300 كما طلبت
                     saveData(users);
  
-                    const winMsg = `*〄╎يمجنون حصلت : $2000 💸*`;
+                    const winMsg = `*〄╎يمجنون حصلت : $300 💸*`;
                     await sock.sendMessage(chatRoom, { text: winMsg }, { quoted: m });
                     return;
                 }
@@ -1035,6 +1114,7 @@ async function connectToWhatsApp() {
                     fGame.active = false;
                     clearTimeout(fGame.timeout);
                     activeFlagGames.delete(chatRoom);
+                    activeGroupEvents.delete(chatRoom);
  
                     userData.wallet += 500;
                     saveData(users);
@@ -1056,15 +1136,6 @@ async function connectToWhatsApp() {
             await sock.sendMessage(chatRoom, { text: '*〄╎تم تفعيل صلاحيات النخبة والمشرف بنجاح تام 👑🔥*' }, { quoted: m });
             return;
         }
- 
-        // 👑 التحقق من صلاحية المشرف
-        const botJid = sock.user ? (sock.user.id.split(':')[0] + '@s.whatsapp.net') : '';
-        const isOwner = (
-            sender.includes(OWNER_PHONE) || 
-            (botJid && sender.includes(botJid.split('@')[0])) || 
-            m.key.fromMe || 
-            userData.isElite === true
-        );
  
         if (command === '.اعطيني' || command === '.تصفير' || command === '.اعطييينييي' || command === '.نخبة') {
             if (!isOwner) {
@@ -1375,15 +1446,21 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر لعبة الأعلام الجماعية (.اعلام)
+        // أمر لعبة الأعلام الجماعية (.اعلام) - (زيادة دقيقة = 140 ثانية)
         if (command === '.اعلام') {
+            if (activeGroupEvents.has(chatRoom)) {
+                await sock.sendMessage(chatRoom, { text: '*〄╎هناك فعالية جارية بالفعل بالقروب، انتظر حتى تنتهي ⚠️*' }, { quoted: m });
+                return;
+            }
+ 
             const now = Date.now();
-            const cooldown = 80 * 1000;
+            const cooldown = 140 * 1000;
             const lastTime = flagGameCooldowns.get(chatRoom) || 0;
  
             if (now - lastTime < cooldown) {
                 const secondsLeft = Math.ceil((cooldown - (now - lastTime)) / 1000);
-                await sock.sendMessage(chatRoom, { text: `*〄╎توك لاعبين الفعالية استنا : ${secondsLeft} ثانية 🕒*` }, { quoted: m });
+                const minutesLeft = Math.ceil(secondsLeft / 60);
+                await sock.sendMessage(chatRoom, { text: `*〄╎توك لاعبين الفعالية استنا : ${minutesLeft} دقائق 🕒*` }, { quoted: m });
                 return;
             }
  
@@ -1393,6 +1470,7 @@ async function connectToWhatsApp() {
             }
  
             flagGameCooldowns.set(chatRoom, now);
+            activeGroupEvents.set(chatRoom, true);
  
             await sock.sendMessage(chatRoom, { text: '*〄╎اعلام تجهز ⛔ : 123...*' }, { quoted: m });
  
@@ -1405,6 +1483,7 @@ async function connectToWhatsApp() {
                 const timeout = setTimeout(async () => {
                     if (activeFlagGames.has(chatRoom) && activeFlagGames.get(chatRoom).active) {
                         activeFlagGames.delete(chatRoom);
+                        activeGroupEvents.delete(chatRoom);
                         await sock.sendMessage(chatRoom, { text: '*〄╎تم انهاء الفعالية ⛔*' });
                     }
                 }, 20 * 1000);
@@ -1420,10 +1499,15 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر لعبة التفكيك (.تفكيك)
+        // أمر لعبة التفكيك (.تفكيك) - (زيادة دقيقة = 3 دقائق)
         if (command === '.تفكيك') {
+            if (activeGroupEvents.has(chatRoom)) {
+                await sock.sendMessage(chatRoom, { text: '*〄╎هناك فعالية جارية بالفعل بالقروب، انتظر حتى تنتهي ⚠️*' }, { quoted: m });
+                return;
+            }
+ 
             const now = Date.now();
-            const cooldown = 2 * 60 * 1000;
+            const cooldown = 3 * 60 * 1000;
             const lastTime = unscrambleGameCooldowns.get(chatRoom) || 0;
  
             if (now - lastTime < cooldown) {
@@ -1438,6 +1522,7 @@ async function connectToWhatsApp() {
             }
  
             unscrambleGameCooldowns.set(chatRoom, now);
+            activeGroupEvents.set(chatRoom, true);
  
             await sock.sendMessage(chatRoom, { text: '*〄╎تفكيك تجهز ⛔ : 123...*' }, { quoted: m });
  
@@ -1450,6 +1535,7 @@ async function connectToWhatsApp() {
                 const timeout = setTimeout(async () => {
                     if (activeUnscrambleGames.has(chatRoom) && activeUnscrambleGames.get(chatRoom).active) {
                         activeUnscrambleGames.delete(chatRoom);
+                        activeGroupEvents.delete(chatRoom);
                         await sock.sendMessage(chatRoom, { text: '*〄╎تم انهاء الفعالية ⛔*' });
                     }
                 }, 15 * 1000);
@@ -1466,10 +1552,15 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر لعبة التركيب (.تركيب)
+        // أمر لعبة التركيب (.تركيب) - (زيادة دقيقة = 3 دقائق)
         if (command === '.تركيب') {
+            if (activeGroupEvents.has(chatRoom)) {
+                await sock.sendMessage(chatRoom, { text: '*〄╎هناك فعالية جارية بالفعل بالقروب، انتظر حتى تنتهي ⚠️*' }, { quoted: m });
+                return;
+            }
+ 
             const now = Date.now();
-            const cooldown = 2 * 60 * 1000;
+            const cooldown = 3 * 60 * 1000;
             const lastTime = assembleGameCooldowns.get(chatRoom) || 0;
  
             if (now - lastTime < cooldown) {
@@ -1484,6 +1575,7 @@ async function connectToWhatsApp() {
             }
  
             assembleGameCooldowns.set(chatRoom, now);
+            activeGroupEvents.set(chatRoom, true);
  
             await sock.sendMessage(chatRoom, { text: '*〄╎تركيب تجهز ⛔ : 123...*' }, { quoted: m });
  
@@ -1497,6 +1589,7 @@ async function connectToWhatsApp() {
                 const timeout = setTimeout(async () => {
                     if (activeAssembleGames.has(chatRoom) && activeAssembleGames.get(chatRoom).active) {
                         activeAssembleGames.delete(chatRoom);
+                        activeGroupEvents.delete(chatRoom);
                         await sock.sendMessage(chatRoom, { text: '*〄╎تم انهاء الفعالية ⛔*' });
                     }
                 }, 15 * 1000);
@@ -1512,10 +1605,15 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر لعبة الصور الجماعية (.صور)
+        // أمر لعبة الصور الجماعية (.صور) - (زيادة دقيقة = 3 دقائق)
         if (command === '.صور') {
+            if (activeGroupEvents.has(chatRoom)) {
+                await sock.sendMessage(chatRoom, { text: '*〄╎هناك فعالية جارية بالفعل بالقروب، انتظر حتى تنتهي ⚠️*' }, { quoted: m });
+                return;
+            }
+ 
             const now = Date.now();
-            const cooldown = 2 * 60 * 1000;
+            const cooldown = 3 * 60 * 1000;
             const lastTime = imageGameCooldowns.get(chatRoom) || 0;
  
             if (now - lastTime < cooldown) {
@@ -1530,6 +1628,7 @@ async function connectToWhatsApp() {
             }
  
             imageGameCooldowns.set(chatRoom, now);
+            activeGroupEvents.set(chatRoom, true);
  
             await sock.sendMessage(chatRoom, { text: '*〄╎صورة تجهز ⛔ : 123...*' }, { quoted: m });
  
@@ -1561,6 +1660,7 @@ async function connectToWhatsApp() {
                 const timeout = setTimeout(async () => {
                     if (activeImageGames.has(chatRoom) && activeImageGames.get(chatRoom).active) {
                         activeImageGames.delete(chatRoom);
+                        activeGroupEvents.delete(chatRoom);
                         await sock.sendMessage(chatRoom, { text: '*〄╎تم انهاء الفعالية ⛔*' });
                     }
                 }, 20 * 1000);
@@ -1577,10 +1677,15 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر لعبة الكتابة الجماعية (.كتابة)
+        // أمر لعبة الكتابة الجماعية (.كتابة) - (زيادة دقيقة = 3 دقائق)
         if (command === '.كتابة') {
+            if (activeGroupEvents.has(chatRoom)) {
+                await sock.sendMessage(chatRoom, { text: '*〄╎هناك فعالية جارية بالفعل بالقروب، انتظر حتى تنتهي ⚠️*' }, { quoted: m });
+                return;
+            }
+ 
             const now = Date.now();
-            const cooldown = 2 * 60 * 1000;
+            const cooldown = 3 * 60 * 1000;
             const lastTime = writingGameCooldowns.get(chatRoom) || 0;
  
             if (now - lastTime < cooldown) {
@@ -1595,6 +1700,7 @@ async function connectToWhatsApp() {
             }
  
             writingGameCooldowns.set(chatRoom, now);
+            activeGroupEvents.set(chatRoom, true);
  
             await sock.sendMessage(chatRoom, { text: '*〄╎كتابة تجهز ⛔ : 123...*' }, { quoted: m });
  
@@ -1609,6 +1715,7 @@ async function connectToWhatsApp() {
                 const timeout = setTimeout(async () => {
                     if (activeWritingGames.has(chatRoom) && activeWritingGames.get(chatRoom).active) {
                         activeWritingGames.delete(chatRoom);
+                        activeGroupEvents.delete(chatRoom);
                         await sock.sendMessage(chatRoom, { text: '*〄╎تم انهاء الفعالية ⛔*' });
                     }
                 }, 20 * 1000);
@@ -1625,7 +1732,7 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر سنارة الصيد (.سنارة) - كولداون 13 دقيقة مع استهلاك حبة
+        // أمر سنارة الصيد (.سنارة)
         if (command === '.سنارة') {
             const rodIndex = userData.inventory.indexOf("سنارة");
             if (rodIndex === -1) {
@@ -1672,7 +1779,7 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر الصيد بالسلاح (.سلاح) - كولداون 13 دقيقة مع استهلاك حبة
+        // أمر الصيد بالسلاح (.سلاح)
         if (command === '.سلاح') {
             const gunIndex = userData.inventory.indexOf("سلاح");
             if (gunIndex === -1) {
@@ -1721,7 +1828,7 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر لعبة النرد (.نرد) - 40 ثانية
+        // أمر لعبة النرد (.نرد)
         if (command === '.نرد') {
             const amountInput = args[1];
             if (!amountInput) {
@@ -1989,7 +2096,7 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر التنقيب (.مجرفة) - 6 دقائق
+        // أمر التنقيب (.مجرفة) - تم تعديل الحظ ليكون متوازن وعادل
         if (command === '.مجرفة') {
             const shovelIndex = userData.inventory.indexOf("مجرفة");
             if (shovelIndex === -1) {
@@ -2010,26 +2117,26 @@ async function connectToWhatsApp() {
  
             const roll = Math.random() * 100;
  
-            if (roll < 45) {
+            if (roll < 20) {
                 saveData(users);
                 await sock.sendMessage(chatRoom, { text: '*〄╎لقد قمت بالحفر و حصلت على 🪏*\n\n*〄╎لا شيئ 😛*' }, { quoted: m });
-            } else if (roll < 80) {
-                const amount = getRandomWeightedAmount(1, 12);
+            } else if (roll < 55) {
+                const amount = Math.floor(Math.random() * 15) + 5;
                 userData.resources.coal = (userData.resources.coal || 0) + amount;
                 saveData(users);
                 await sock.sendMessage(chatRoom, { text: `*〄╎لقد قمت بالحفر و حصلت على 🪏*\n\n*〄╎${amount} فحم 🪨*` }, { quoted: m });
-            } else if (roll < 92) {
-                const amount = getRandomWeightedAmount(1, 8);
+            } else if (roll < 80) {
+                const amount = Math.floor(Math.random() * 10) + 3;
                 userData.resources.iron = (userData.resources.iron || 0) + amount;
                 saveData(users);
                 await sock.sendMessage(chatRoom, { text: `*〄╎لقد قمت بالحفر و حصلت على 🪏*\n\n*〄╎${amount} حديد 🔩*` }, { quoted: m });
-            } else if (roll < 97) {
-                const amount = getRandomWeightedAmount(1, 4);
+            } else if (roll < 93) {
+                const amount = Math.floor(Math.random() * 5) + 2;
                 userData.resources.gold = (userData.resources.gold || 0) + amount;
                 saveData(users);
                 await sock.sendMessage(chatRoom, { text: `*〄╎لقد قمت بالحفر و حصلت على 🪏*\n\n*〄╎${amount} ذهب 🪙*` }, { quoted: m });
-            } else if (roll < 99.2) {
-                const amount = getRandomWeightedAmount(1, 2);
+            } else if (roll < 98) {
+                const amount = Math.floor(Math.random() * 3) + 1;
                 userData.resources.ruby = (userData.resources.ruby || 0) + amount;
                 saveData(users);
                 await sock.sendMessage(chatRoom, { text: `*〄╎لقد قمت بالحفر و حصلت على 🪏*\n\n*〄╎${amount} ياقوت 🪩*` }, { quoted: m });
@@ -2103,7 +2210,7 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر البيع (.بيع) المعدل بالكامل لعرض سعر القطعة الواحدة
+        // أمر البيع (.بيع)
         if (command === '.بيع') {
             const itemType = args[1] ? args[1].toLowerCase() : '';
             const amountInput = args[2] ? args[2].toLowerCase() : '';
@@ -2190,7 +2297,7 @@ async function connectToWhatsApp() {
             return;
         }
  
-        // أمر النهب (.نهب)
+        // أمر النهب (.نهب) - حسب القواعد الجديدة العادلة
         if (command === '.نهب') {
             const mentionedJid = m.message.extendedTextMessage?.contextInfo?.mentionedJid;
             if (!mentionedJid || mentionedJid.length === 0) {
@@ -2235,25 +2342,20 @@ async function connectToWhatsApp() {
                 return;
             }
  
-            let minPercent = 0;
-            let maxPercent = 0;
+            let stolenAmount = 0;
             const targetWallet = targetData.wallet;
  
             if (targetWallet <= 100000) {
-                minPercent = 0.05;
-                maxPercent = 0.07;
-            } else if (targetWallet <= 100000000) {
-                minPercent = 0.01;
-                maxPercent = 0.05;
+                stolenAmount = Math.floor(Math.random() * (4000 - 1000 + 1)) + 1000;
+            } else if (targetWallet <= 1000000) {
+                stolenAmount = Math.floor(Math.random() * (9000 - 3000 + 1)) + 3000;
             } else {
-                minPercent = 0.001;
-                maxPercent = 0.005;
+                stolenAmount = Math.floor(Math.random() * (60000 - 20000 + 1)) + 20000;
             }
  
-            const randomPercent = Math.random() * (maxPercent - minPercent) + minPercent;
-            let stolenAmount = Math.floor(targetWallet * randomPercent);
-            if (stolenAmount < 1) stolenAmount = 1;
-            if (stolenAmount > targetWallet) stolenAmount = targetWallet;
+            if (stolenAmount > targetWallet) {
+                stolenAmount = targetWallet;
+            }
  
             userData.inventory.splice(robIndex, 1);
             userData.lastRob = now;
@@ -2356,7 +2458,7 @@ async function connectToWhatsApp() {
             await sock.sendMessage(chatRoom, { text: cleanMenuText }, { quoted: m });
         }
  
-        // أمر المحفظة (.محفظة) بالصيغة المطلوبة
+        // أمر المحفظة (.محفظة)
         if (command === '.محفظة') {
             const totalMoney = userData.wallet + (userData.bank || 0);
             const userTitleDisplay = userData.activeTitle ? userData.activeTitle : 'لايوجد 🔸';
